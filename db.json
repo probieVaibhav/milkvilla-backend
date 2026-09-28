@@ -1,5 +1,123 @@
 {
+  "verifiedEmails": [
+    {
+      "email": "vaibhavji1999@gmail.com",
+      "verifiedAt": "2026-09-28T08:13:11.068Z"
+    }
+  ],
+  "pendingVerifications": [],
   "orders": [
+    {
+      "id": "MV-1790584588802",
+      "customerName": "vaibhav",
+      "email": "vaibhavji1999@gmail.com",
+      "phone": "9034904461",
+      "address": "ambala cantt",
+      "city": "ambala",
+      "pincode": "133001",
+      "notes": "N/A",
+      "latitude": 30.34854009226776,
+      "longitude": 76.87416946724537,
+      "distanceKm": 0.03,
+      "items": [
+        {
+          "productId": "dahi-500g",
+          "name": "Fresh Dahi",
+          "quantity": 1,
+          "price": 40,
+          "total": 40
+        }
+      ],
+      "subtotal": 40,
+      "deliveryFee": 0,
+      "total": 40,
+      "paymentMethod": "cash-on-delivery",
+      "status": "delivered",
+      "createdAt": "2026-09-28T08:36:28.802Z"
+    },
+    {
+      "id": "MV-1790584448558",
+      "customerName": "vaibhav",
+      "email": "vaibhavji1999@gmail.com",
+      "phone": "9034904461",
+      "address": "ambala cantt",
+      "city": "ambala",
+      "pincode": "133001",
+      "notes": "N/A",
+      "latitude": 30.34854009226776,
+      "longitude": 76.87416946724537,
+      "distanceKm": 0.03,
+      "items": [
+        {
+          "productId": "milk-1l-buffalo",
+          "name": "Fresh Buffelo Milk",
+          "quantity": 1,
+          "price": 70,
+          "total": 70
+        }
+      ],
+      "subtotal": 70,
+      "deliveryFee": 0,
+      "total": 70,
+      "paymentMethod": "cash-on-delivery",
+      "status": "delivered",
+      "createdAt": "2026-09-28T08:34:08.558Z"
+    },
+    {
+      "id": "MV-1790583274427",
+      "customerName": "vaibhav",
+      "email": "vaibhavji1999@gmail.com",
+      "phone": "9034904461",
+      "address": "ambala cantt",
+      "city": "ambala",
+      "pincode": "133001",
+      "notes": "N/A",
+      "latitude": 30.348536546083476,
+      "longitude": 76.87412958712476,
+      "distanceKm": 0.03,
+      "items": [
+        {
+          "productId": "milk-1l-buffalo",
+          "name": "Fresh Buffelo Milk",
+          "quantity": 1,
+          "price": 70,
+          "total": 70
+        }
+      ],
+      "subtotal": 70,
+      "deliveryFee": 0,
+      "total": 70,
+      "paymentMethod": "cash-on-delivery",
+      "status": "delivered",
+      "createdAt": "2026-09-28T08:14:34.427Z"
+    },
+    {
+      "id": "MV-1790570728677",
+      "customerName": "vaibhav",
+      "phone": "9034904461",
+      "address": "ambala cantt",
+      "city": "Ambala",
+      "pincode": "133001",
+      "notes": "N/A",
+      "latitude": 30.348580139847375,
+      "longitude": 76.8741516555242,
+      "distanceKm": 0.03,
+      "items": [
+        {
+          "productId": "ghee-500g",
+          "name": "Original Ghee",
+          "quantity": 1,
+          "price": 600,
+          "total": 600
+        }
+      ],
+      "subtotal": 600,
+      "deliveryFee": 0,
+      "total": 600,
+      "paymentMethod": "cash-on-delivery",
+      "status": "delivered",
+      "createdAt": "2026-09-28T04:45:28.677Z"
+    },
     {
       "id": "MV-1790519495762",
       "customerName": "ritesh",
