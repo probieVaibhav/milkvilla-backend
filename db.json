@@ -8,6 +8,120 @@
   "pendingVerifications": [],
   "orders": [
     {
+      "id": "MV-1790587587489",
+      "customerName": "vaibhav",
+      "email": "vaibhavji1999@gmail.com",
+      "phone": "9034904461",
+      "address": "ambala cantt",
+      "city": "ambala",
+      "pincode": "133001",
+      "notes": "",
+      "latitude": 30.34857403356005,
+      "longitude": 76.8741539173975,
+      "distanceKm": 0.03,
+      "items": [
+        {
+          "productId": "dahi-500g",
+          "name": "Fresh Dahi",
+          "quantity": 1,
+          "price": 40,
+          "total": 40
+        }
+      ],
+      "subtotal": 40,
+      "deliveryFee": 0,
+      "total": 40,
+      "paymentMethod": "cash-on-delivery",
+      "status": "pending",
+      "createdAt": "2026-09-28T09:26:27.489Z"
+    },
+    {
+      "id": "MV-1790587289487",
+      "customerName": "vaibhav",
+      "email": "vaibhavji1999@gmail.com",
+      "phone": "9034904461",
+      "address": "ambala cantt",
+      "city": "ambala",
+      "pincode": "133001",
+      "notes": "N/A",
+      "latitude": 30.348607761728747,
+      "longitude": 76.87416929011432,
+      "distanceKm": 0.03,
+      "items": [
+        {
+          "productId": "ghee-250g",
+          "name": "Original Ghee",
+          "quantity": 1,
+          "price": 300,
+          "total": 300
+        }
+      ],
+      "subtotal": 300,
+      "deliveryFee": 0,
+      "total": 300,
+      "paymentMethod": "cash-on-delivery",
+      "status": "canceled",
+      "createdAt": "2026-09-28T09:21:29.487Z",
+      "cancellationReason": "mera man kiya to kar diya cancel. Kya kar lega ?"
+    },
+    {
+      "id": "MV-1790586631545",
+      "customerName": "vaibhav",
+      "email": "vaibhavji1999@gmail.com",
+      "phone": "nothign",
+      "address": "ambala cantt",
+      "city": "ambala",
+      "pincode": "asfsdfsdf",
+      "notes": "",
+      "latitude": 30.34840404411193,
+      "longitude": 76.87408123872909,
+      "distanceKm": 0.02,
+      "items": [
+        {
+          "productId": "ghee-250g",
+          "name": "Original Ghee",
+          "quantity": 1,
+          "price": 300,
+          "total": 300
+        }
+      ],
+      "subtotal": 300,
+      "deliveryFee": 0,
+      "total": 300,
+      "paymentMethod": "cash-on-delivery",
+      "status": "canceled",
+      "createdAt": "2026-09-28T09:10:31.546Z",
+      "cancellationReason": "Canceled because one or more items are not in stock."
+    },
+    {
+      "id": "MV-1790586033320",
+      "customerName": "vaibhav",
+      "email": "vaibhavji1999@gmail.com",
+      "phone": "9034904461",
+      "address": "ambala cantt",
+      "city": "ambala",
+      "pincode": "133001",
+      "notes": "N/A",
+      "latitude": 30.34855438706512,
+      "longitude": 76.8740873149359,
+      "distanceKm": 0.03,
+      "items": [
+        {
+          "productId": "milk-1l-buffalo",
+          "name": "Fresh Buffelo Milk",
+          "quantity": 1,
+          "price": 70,
+          "total": 70
+        }
+      ],
+      "subtotal": 70,
+      "deliveryFee": 0,
+      "total": 70,
+      "paymentMethod": "cash-on-delivery",
+      "status": "delivered",
+      "createdAt": "2026-09-28T09:00:33.320Z"
+    },
+    {
       "id": "MV-1790584588802",
       "customerName": "vaibhav",
       "email": "vaibhavji1999@gmail.com",

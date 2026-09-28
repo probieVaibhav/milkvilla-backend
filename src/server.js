@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { MongoClient } from "mongodb";
 import { products } from "./products.js";
 import { sendCustomerOrderConfirmationEmail, sendCustomerStatusEmail, sendOrderNotifications, sendTestEmail, sendVerificationEmail } from "./notifications.js";
+import { checkoutEmailSchema, checkoutOrderSchema } from "./validation/checkout.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -17,11 +18,27 @@ const frontendOrigin = (process.env.FRONTEND_URL || "http://localhost:5173").rep
 const verificationFrontendUrl = (process.env.NODE_ENV === "production" ? process.env.FRONTEND_URL_PROD || process.env.FRONTEND_URL : process.env.FRONTEND_URL || process.env.FRONTEND_URL_PROD || "http://localhost:5173").replace(/\/+$/, "");
 const sessionCookie = "milk-villa-owner-session";
 const sessionDurationMs = 8 * 60 * 60 * 1000;
-const statuses = ["pending", "placed", "out-for-delivery", "delivered"];
+const statuses = ["pending", "placed", "out-for-delivery", "delivered", "canceled"];
 const client = process.env.MONGODB_URI ? new MongoClient(process.env.MONGODB_URI) : null;
 const localDatabasePath = resolve(dirname(fileURLToPath(import.meta.url)), "../db.json");
 let database;
 let localDatabaseQueue = Promise.resolve();
+const adminEventClients = new Set();
+
+const publishAdminEvent = (eventName, payload) => {
+  const message = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
+  for (const client of adminEventClients) {
+    if (client.destroyed || client.writableEnded) {
+      adminEventClients.delete(client);
+      continue;
+    }
+    try {
+      client.write(message);
+    } catch {
+      adminEventClients.delete(client);
+    }
+  }
+};
 
 app.use(cors({ origin: frontendOrigin, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
@@ -312,8 +329,8 @@ const documentedOperations = {
       required: true,
       content: {
         "application/json": {
-          schema: { type: "object", required: ["status"], properties: { status: { type: "string", enum: statuses } } },
-          example: { status: "placed" },
+          schema: { type: "object", required: ["status"], properties: { status: { type: "string", enum: statuses }, cancellationReason: { type: "string", maxLength: 1000 } } },
+          example: { status: "canceled", cancellationReason: "Canceled because one or more items are not in stock." },
         },
       },
     },
@@ -400,10 +417,9 @@ app.post("/api/email/test", requireOwner, async (_request, response) => {
 });
 
 app.post("/api/email/status", async (request, response) => {
-  const email = String(request.body?.email || "")
-    .trim()
-    .toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid email address." });
+  const emailValidation = checkoutEmailSchema.safeParse(request.body?.email);
+  if (!emailValidation.success) return response.status(400).json({ error: emailValidation.error.issues[0]?.message || "Enter a valid email address." });
+  const email = emailValidation.data;
   try {
     return response.json({ email, verified: await findVerifiedEmail(email) });
   } catch (error) {
@@ -413,10 +429,9 @@ app.post("/api/email/status", async (request, response) => {
 });
 
 app.post("/api/email/verification", async (request, response) => {
-  const email = String(request.body?.email || "")
-    .trim()
-    .toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid email address." });
+  const emailValidation = checkoutEmailSchema.safeParse(request.body?.email);
+  if (!emailValidation.success) return response.status(400).json({ error: emailValidation.error.issues[0]?.message || "Enter a valid email address." });
+  const email = emailValidation.data;
   try {
     if (await findVerifiedEmail(email)) return response.json({ ok: true, verified: true, email, message: "This email is already verified." });
     const pending = await readPendingVerification(email);
@@ -466,33 +481,35 @@ app.post("/api/email/verify", async (request, response) => {
 
 app.post("/api/orders", async (request, response) => {
   try {
-    const { customerName, email, verificationToken, phone, address, city, pincode, notes = "", latitude, longitude, items } = request.body || {};
-    const normalizedEmail = String(email || "")
-      .trim()
-      .toLowerCase();
-    if (!customerName || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || !phone || !address || !city || !pincode || !Array.isArray(items) || items.length === 0 || !Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) return response.status(400).json({ error: "Complete customer details, a valid email, location, and at least one item are required." });
+    const validation = checkoutOrderSchema.safeParse(request.body || {});
+    if (!validation.success) {
+      return response.status(400).json({
+        error: "Please check the customer details, delivery location, and order items.",
+        fieldErrors: validation.error.flatten().fieldErrors,
+      });
+    }
+    const { customerName, email: normalizedEmail, verificationToken, phone, address, city, pincode, notes, latitude, longitude, items } = validation.data;
     if (getVerifiedEmail(verificationToken)?.email !== normalizedEmail && !(await findVerifiedEmail(normalizedEmail))) return response.status(403).json({ error: "Verify your email before placing this order." });
     const catalog = new Map(products.map((product) => [product.id, product]));
     const normalizedItems = items.map((item) => {
       const product = catalog.get(item.productId);
-      const quantity = Number(item.quantity);
-      if (!product || !Number.isInteger(quantity) || quantity < 1 || quantity > 99) throw new Error("Invalid product or quantity.");
-      return { productId: product.id, name: product.name, quantity, price: product.price, total: product.price * quantity };
+      if (!product) throw new Error("One or more selected products are no longer available.");
+      return { productId: product.id, name: product.name, quantity: item.quantity, price: product.price, total: product.price * item.quantity };
     });
     const subtotal = normalizedItems.reduce((sum, item) => sum + item.total, 0);
-    const calculatedDistance = Number(distanceKm(Number(latitude), Number(longitude)).toFixed(2));
+    const calculatedDistance = Number(distanceKm(latitude, longitude).toFixed(2));
     const deliveryFee = calculatedDistance > 10 ? 40 : 0;
     const order = {
       id: `MV-${Date.now()}`,
-      customerName: String(customerName).trim(),
+      customerName,
       email: normalizedEmail,
-      phone: String(phone).trim(),
-      address: String(address).trim(),
-      city: String(city).trim(),
-      pincode: String(pincode).trim(),
-      notes: String(notes).trim(),
-      latitude: Number(latitude),
-      longitude: Number(longitude),
+      phone,
+      address,
+      city,
+      pincode,
+      notes,
+      latitude,
+      longitude,
       distanceKm: calculatedDistance,
       items: normalizedItems,
       subtotal,
@@ -509,6 +526,7 @@ app.post("/api/orders", async (request, response) => {
       console.error("MongoDB order save failed; using db.json:", databaseError);
       await updateLocalOrders((orders) => orders.unshift(order));
     }
+    publishAdminEvent("order-created", { orderId: order.id });
     let customerEmail = { sent: false };
     try {
       await sendCustomerOrderConfirmationEmail(order);
@@ -527,6 +545,19 @@ app.post("/api/orders", async (request, response) => {
     console.error(error);
     return response.status(400).json({ error: error.message || "Order could not be placed." });
   }
+});
+
+app.get("/api/admin/order-events", requireOwner, (request, response) => {
+  response.status(200).set({
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
+  });
+  response.flushHeaders();
+  response.write("retry: 5000\n: connected\n\n");
+  adminEventClients.add(response);
+  response.on("close", () => adminEventClients.delete(response));
 });
 
 app.get("/api/orders", requireOwner, async (request, response) => {
@@ -562,18 +593,24 @@ app.get("/api/orders", requireOwner, async (request, response) => {
 
 app.put("/api/orders/:id/status", requireOwner, async (request, response) => {
   const { status } = request.body || {};
+  const cancellationReason = typeof request.body?.cancellationReason === "string" ? request.body.cancellationReason.trim() : "";
   if (!statuses.includes(status)) return response.status(400).json({ error: "Invalid order status." });
+  if (status === "canceled" && !cancellationReason) return response.status(400).json({ error: "A cancellation reason is required." });
+  if (cancellationReason.length > 1000) return response.status(400).json({ error: "Cancellation reasons must be 1000 characters or fewer." });
   let updatedOrder;
   let previousStatus;
+  const orderUpdates = { status };
+  if (status === "canceled") orderUpdates.cancellationReason = cancellationReason;
   try {
     const collection = (await getDatabase()).collection("orders");
     const currentOrder = await collection.findOne({ id: request.params.id });
     if (!currentOrder) return response.status(404).json({ error: "Order not found." });
     if (currentOrder.status === "delivered") return response.status(409).json({ error: "Delivered orders cannot be changed." });
     if (currentOrder.status === status) return response.json({ order: currentOrder, notification: { sent: true, skipped: true } });
+    if (currentOrder.status === "canceled") return response.status(409).json({ error: "Canceled orders cannot be changed." });
     previousStatus = currentOrder.status;
-    const result = await collection.findOneAndUpdate({ id: request.params.id, status: { $ne: "delivered" } }, { $set: { status } }, { returnDocument: "after" });
-    if (!result) return response.status(409).json({ error: "Delivered orders cannot be changed." });
+    const result = await collection.findOneAndUpdate({ id: request.params.id, status: { $nin: ["delivered", "canceled"] } }, { $set: orderUpdates }, { returnDocument: "after" });
+    if (!result) return response.status(409).json({ error: "Delivered or canceled orders cannot be changed." });
     updatedOrder = result;
   } catch (error) {
     console.error("MongoDB order update failed; using db.json:", error);
@@ -583,8 +620,9 @@ app.put("/api/orders/:id/status", requireOwner, async (request, response) => {
         if (!matchingOrder) return { status: 404, error: "Order not found." };
         if (matchingOrder.status === "delivered") return { status: 409, error: "Delivered orders cannot be changed." };
         if (matchingOrder.status === status) return { order: matchingOrder, skipped: true };
+        if (matchingOrder.status === "canceled") return { status: 409, error: "Canceled orders cannot be changed." };
         previousStatus = matchingOrder.status;
-        matchingOrder.status = status;
+        Object.assign(matchingOrder, orderUpdates);
         return { order: matchingOrder };
       });
       if (result.error) return response.status(result.status).json({ error: result.error });

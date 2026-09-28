@@ -58,6 +58,10 @@ export async function sendCustomerStatusEmail(order) {
   const statusLabel = order.status.replaceAll("-", " ");
   const customerName = escapeHtml(order.customerName);
   const orderId = escapeHtml(order.id);
+  const cancellationReason = order.status === "canceled" ? order.cancellationReason || "Please contact Milk Villa for details." : "";
+  const escapedCancellationReason = escapeHtml(cancellationReason);
+  const statusMessage = order.status === "canceled" ? `has been canceled. Reason: ${cancellationReason}` : `is now ${statusLabel}.`;
+  const statusHtml = order.status === "canceled" ? `has been canceled.<br>Reason: ${escapedCancellationReason}` : `is now <strong>${statusLabel}</strong>.`;
   const feedbackUrl = "https://g.page/r/CaAPk2WLVIAGEAI/review";
   const deliveredMessage = order.status === "delivered" ? `\n\nWe'd love your feedback: ${feedbackUrl}` : "";
   const deliveredHtml = order.status === "delivered" ? `<p><a href="${feedbackUrl}">Share your feedback</a></p>` : "";
@@ -65,8 +69,8 @@ export async function sendCustomerStatusEmail(order) {
     from: process.env.SMTP_FROM || process.env.SMTP_USER,
     to: order.email,
     subject: `Your Milk Villa order ${order.id} is ${statusLabel}`,
-    text: `Hello ${order.customerName},\n\nYour order ${order.id} is now ${statusLabel}.${deliveredMessage}\n\nThank you,\nMilk Villa`,
-    html: `<p>Hello ${customerName},</p><p>Your order <strong>${orderId}</strong> is now <strong>${statusLabel}</strong>.</p>${deliveredHtml}<p>Thank you,<br>Milk Villa</p>`,
+    text: `Hello ${order.customerName},\n\nYour order ${order.id} ${statusMessage}${deliveredMessage}\n\nThank you,\nMilk Villa`,
+    html: `<p>Hello ${customerName},</p><p>Your order <strong>${orderId}</strong> ${statusHtml}</p>${deliveredHtml}<p>Thank you,<br>Milk Villa</p>`,
   });
 }
 
