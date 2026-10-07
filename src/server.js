@@ -4,11 +4,8 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import swaggerUi from "swagger-ui-express";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { MongoClient } from "mongodb";
 import { products } from "./products.js";
+import { completeEmailVerification, countOrders, findVerifiedEmail, initializeDatabase, listOrders, readPendingVerification, saveOrder, savePendingVerification, updateOrderStatus } from "./database.js";
 import { sendCustomerOrderConfirmationEmail, sendCustomerStatusEmail, sendOrderNotifications, sendTestEmail, sendVerificationEmail } from "./notifications.js";
 import { checkoutEmailSchema, checkoutOrderSchema } from "./validation/checkout.js";
 
@@ -19,10 +16,6 @@ const verificationFrontendUrl = (process.env.NODE_ENV === "production" ? process
 const sessionCookie = "milk-villa-owner-session";
 const sessionDurationMs = 8 * 60 * 60 * 1000;
 const statuses = ["pending", "placed", "out-for-delivery", "delivered", "canceled"];
-const client = process.env.MONGODB_URI ? new MongoClient(process.env.MONGODB_URI) : null;
-const localDatabasePath = resolve(dirname(fileURLToPath(import.meta.url)), "../db.json");
-let database;
-let localDatabaseQueue = Promise.resolve();
 const adminEventClients = new Set();
 
 const publishAdminEvent = (eventName, payload) => {
@@ -44,15 +37,6 @@ app.use(cors({ origin: frontendOrigin, credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use(cookieParser());
 
-const getDatabase = async () => {
-  if (!client) throw new Error("MONGODB_URI is not configured.");
-  if (!database) {
-    await client.connect();
-    database = client.db(process.env.MONGODB_DB || "milkVilla");
-  }
-  return database;
-};
-
 const getPagination = (query, total, defaultLimit) => {
   const requestedPage = Number.parseInt(query.page, 10);
   const requestedLimit = Number.parseInt(query.limit, 10);
@@ -60,112 +44,6 @@ const getPagination = (query, total, defaultLimit) => {
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const page = Math.min(Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1, totalPages);
   return { page, limit, total, totalPages, offset: (page - 1) * limit };
-};
-
-const countOrderStatuses = (orders) =>
-  orders.reduce(
-    (counts, order) => {
-      if (statuses.includes(order.status)) counts[order.status] += 1;
-      return counts;
-    },
-    Object.fromEntries(statuses.map((status) => [status, 0])),
-  );
-
-const readLocalDatabase = async () => {
-  await localDatabaseQueue;
-  try {
-    return JSON.parse(await readFile(localDatabasePath, "utf8"));
-  } catch (error) {
-    if (error.code === "ENOENT") return {};
-    throw error;
-  }
-};
-
-const updateLocalDatabase = (update) => {
-  const operation = localDatabaseQueue.then(async () => {
-    let data = {};
-    try {
-      data = JSON.parse(await readFile(localDatabasePath, "utf8"));
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-    const result = update(data);
-    const temporaryPath = `${localDatabasePath}.tmp`;
-    await writeFile(temporaryPath, `${JSON.stringify(data, null, 2)}\n`);
-    await rename(temporaryPath, localDatabasePath);
-    return result;
-  });
-  localDatabaseQueue = operation.catch(() => {});
-  return operation;
-};
-
-const readLocalOrders = async () => {
-  const data = await readLocalDatabase();
-  return Array.isArray(data.orders) ? data.orders : [];
-};
-
-const updateLocalOrders = (update) =>
-  updateLocalDatabase((data) => {
-    data.orders = Array.isArray(data.orders) ? data.orders : [];
-    return update(data.orders);
-  });
-
-const findVerifiedEmail = async (email) => {
-  try {
-    return Boolean(await (await getDatabase()).collection("verifiedEmails").findOne({ _id: email }));
-  } catch {
-    const data = await readLocalDatabase();
-    return (data.verifiedEmails || []).some((entry) => (typeof entry === "string" ? entry : entry.email) === email);
-  }
-};
-
-const readPendingVerification = async (email) => {
-  try {
-    return await (await getDatabase()).collection("pendingVerifications").findOne({ _id: email });
-  } catch {
-    const data = await readLocalDatabase();
-    return (data.pendingVerifications || []).find((entry) => entry.email === email) || null;
-  }
-};
-
-const savePendingVerification = async (record) => {
-  try {
-    await (await getDatabase()).collection("pendingVerifications").replaceOne({ _id: record.email }, { ...record, _id: record.email }, { upsert: true });
-  } catch (error) {
-    console.error("MongoDB verification save failed; using db.json:", error);
-    await updateLocalDatabase((data) => {
-      data.pendingVerifications = Array.isArray(data.pendingVerifications) ? data.pendingVerifications : [];
-      data.pendingVerifications = data.pendingVerifications.filter((entry) => entry.email !== record.email);
-      data.pendingVerifications.push(record);
-    });
-  }
-};
-
-const completeEmailVerification = async (email, nonce) => {
-  try {
-    const database = await getDatabase();
-    const pending = database.collection("pendingVerifications");
-    const record = await pending.findOne({ _id: email, nonce, expiresAt: { $gt: Date.now() } });
-    if (!record) return null;
-    await database.collection("verifiedEmails").updateOne({ _id: email }, { $setOnInsert: { email, verifiedAt: new Date().toISOString() } }, { upsert: true });
-    await pending.deleteOne({ _id: email });
-    return record.checkout;
-  } catch (error) {
-    console.error("MongoDB email verification failed; using db.json:", error);
-    let checkout = null;
-    await updateLocalDatabase((data) => {
-      data.verifiedEmails = Array.isArray(data.verifiedEmails) ? data.verifiedEmails : [];
-      data.pendingVerifications = Array.isArray(data.pendingVerifications) ? data.pendingVerifications : [];
-      const record = data.pendingVerifications.find((entry) => entry.email === email && entry.nonce === nonce && entry.expiresAt > Date.now());
-      if (!record) return;
-      checkout = record.checkout || null;
-      if (!data.verifiedEmails.some((entry) => (typeof entry === "string" ? entry : entry.email) === email)) {
-        data.verifiedEmails.push({ email, verifiedAt: new Date().toISOString() });
-      }
-      data.pendingVerifications = data.pendingVerifications.filter((entry) => entry.email !== email);
-    });
-    return checkout;
-  }
 };
 
 const distanceKm = (latitude, longitude) => {
@@ -401,6 +279,7 @@ app.post("/api/auth/login", (request, response) => {
   response.cookie(sessionCookie, createSession(username), { httpOnly: true, sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", secure: process.env.NODE_ENV === "production", maxAge: sessionDurationMs, path: "/" });
   return response.json({ ok: true });
 });
+
 app.post("/api/auth/logout", (_request, response) => {
   response.clearCookie(sessionCookie, { httpOnly: true, sameSite: process.env.NODE_ENV === "production" ? "none" : "lax", secure: process.env.NODE_ENV === "production", path: "/" });
   response.json({ ok: true });
@@ -520,11 +399,10 @@ app.post("/api/orders", async (request, response) => {
       createdAt: new Date().toISOString(),
     };
     try {
-      const collection = (await getDatabase()).collection("orders");
-      await collection.insertOne(order);
+      saveOrder(order);
     } catch (databaseError) {
-      console.error("MongoDB order save failed; using db.json:", databaseError);
-      await updateLocalOrders((orders) => orders.unshift(order));
+      console.error("SQLite order save failed:", databaseError);
+      return response.status(500).json({ error: "Order could not be saved." });
     }
     publishAdminEvent("order-created", { orderId: order.id });
     let customerEmail = { sent: false };
@@ -562,32 +440,18 @@ app.get("/api/admin/order-events", requireOwner, (request, response) => {
 
 app.get("/api/orders", requireOwner, async (request, response) => {
   try {
-    const collection = (await getDatabase()).collection("orders");
-    const total = await collection.countDocuments({});
+    const total = countOrders();
     const pagination = getPagination(request.query, total, 8);
-    const [orders, statusRows] = await Promise.all([collection.find({}).sort({ createdAt: -1 }).skip(pagination.offset).limit(pagination.limit).toArray(), collection.aggregate([{ $group: { _id: "$status", count: { $sum: 1 } } }]).toArray()]);
-    const counts = Object.fromEntries(statuses.map((status) => [status, 0]));
-    statusRows.forEach(({ _id, count }) => {
-      if (statuses.includes(_id)) counts[_id] = count;
-    });
+    const result = listOrders(pagination);
+    const counts = Object.fromEntries(statuses.map((status) => [status, result.counts[status] || 0]));
     response.json({
-      orders,
+      orders: result.orders,
       pagination: { page: pagination.page, limit: pagination.limit, total: pagination.total, totalPages: pagination.totalPages },
       counts,
     });
   } catch (error) {
-    console.error("MongoDB order load failed; using db.json:", error);
-    try {
-      const allOrders = (await readLocalOrders()).sort((first, second) => second.createdAt.localeCompare(first.createdAt));
-      const pagination = getPagination(request.query, allOrders.length, 8);
-      response.json({
-        orders: allOrders.slice(pagination.offset, pagination.offset + pagination.limit),
-        pagination: { page: pagination.page, limit: pagination.limit, total: pagination.total, totalPages: pagination.totalPages },
-        counts: countOrderStatuses(allOrders),
-      });
-    } catch (localError) {
-      response.status(500).json({ error: localError.message });
-    }
+    console.error("SQLite order load failed:", error);
+    response.status(500).json({ error: error.message });
   }
 });
 
@@ -597,52 +461,32 @@ app.put("/api/orders/:id/status", requireOwner, async (request, response) => {
   if (!statuses.includes(status)) return response.status(400).json({ error: "Invalid order status." });
   if (status === "canceled" && !cancellationReason) return response.status(400).json({ error: "A cancellation reason is required." });
   if (cancellationReason.length > 1000) return response.status(400).json({ error: "Cancellation reasons must be 1000 characters or fewer." });
-  let updatedOrder;
-  let previousStatus;
-  const orderUpdates = { status };
-  if (status === "canceled") orderUpdates.cancellationReason = cancellationReason;
+
+  let result;
   try {
-    const collection = (await getDatabase()).collection("orders");
-    const currentOrder = await collection.findOne({ id: request.params.id });
-    if (!currentOrder) return response.status(404).json({ error: "Order not found." });
-    if (currentOrder.status === "delivered") return response.status(409).json({ error: "Delivered orders cannot be changed." });
-    if (currentOrder.status === status) return response.json({ order: currentOrder, notification: { sent: true, skipped: true } });
-    if (currentOrder.status === "canceled") return response.status(409).json({ error: "Canceled orders cannot be changed." });
-    previousStatus = currentOrder.status;
-    const result = await collection.findOneAndUpdate({ id: request.params.id, status: { $nin: ["delivered", "canceled"] } }, { $set: orderUpdates }, { returnDocument: "after" });
-    if (!result) return response.status(409).json({ error: "Delivered or canceled orders cannot be changed." });
-    updatedOrder = result;
+    result = updateOrderStatus(request.params.id, status, cancellationReason);
   } catch (error) {
-    console.error("MongoDB order update failed; using db.json:", error);
-    try {
-      const result = await updateLocalOrders((orders) => {
-        const matchingOrder = orders.find((entry) => entry.id === request.params.id);
-        if (!matchingOrder) return { status: 404, error: "Order not found." };
-        if (matchingOrder.status === "delivered") return { status: 409, error: "Delivered orders cannot be changed." };
-        if (matchingOrder.status === status) return { order: matchingOrder, skipped: true };
-        if (matchingOrder.status === "canceled") return { status: 409, error: "Canceled orders cannot be changed." };
-        previousStatus = matchingOrder.status;
-        Object.assign(matchingOrder, orderUpdates);
-        return { order: matchingOrder };
-      });
-      if (result.error) return response.status(result.status).json({ error: result.error });
-      updatedOrder = result.order;
-      if (result.skipped) return response.json({ order: updatedOrder, notification: { sent: true, skipped: true } });
-    } catch (localError) {
-      return response.status(500).json({ error: localError.message });
-    }
+    console.error("SQLite order update failed:", error);
+    return response.status(500).json({ error: error.message });
   }
+  if (result.kind === "not-found") return response.status(404).json({ error: "Order not found." });
+  if (result.kind === "delivered") return response.status(409).json({ error: "Delivered orders cannot be changed." });
+  if (result.kind === "canceled") return response.status(409).json({ error: "Canceled orders cannot be changed." });
+  if (result.kind === "same") return response.json({ order: result.order, notification: { sent: true, skipped: true } });
+
+  const updatedOrder = result.order;
   try {
     if (!updatedOrder.email) throw new Error("This order has no customer email address.");
     await sendCustomerStatusEmail(updatedOrder);
     return response.json({ order: updatedOrder, notification: { sent: true } });
   } catch (notificationError) {
     console.error("Customer status email failed:", notificationError);
-    return response.json({ order: updatedOrder, notification: { sent: false, warning: notificationError.message || "Customer email could not be sent." }, previousStatus });
+    return response.json({ order: updatedOrder, notification: { sent: false, warning: notificationError.message || "Customer email could not be sent." }, previousStatus: result.previousStatus });
   }
 });
 
 app.get("/api/docs/openapi.json", (_request, response) => response.json(createOpenApiDocument()));
 app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(null, { swaggerOptions: { url: "/api/docs/openapi.json", withCredentials: true } }));
 
+await initializeDatabase();
 app.listen(port, () => console.log(`Milk Villa API listening on port ${port}`));
