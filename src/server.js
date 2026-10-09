@@ -4,10 +4,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import swaggerUi from "swagger-ui-express";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { backupDatabase, completeEmailVerification, countOrders, countProducts, findVerifiedEmail, getAllProducts, initializeDatabase, listAdminProducts, listOrders, listProductCategories, listProducts, readPendingVerification, saveOrder, savePendingVerification, saveProduct, updateOrderStatus } from "./database.js";
+import { completeEmailVerification, countOrders, countProducts, disconnectDatabase, findVerifiedEmail, getAllProducts, initializeDatabase, listAdminProducts, listOrders, listProductCategories, listProducts, readPendingVerification, saveOrder, savePendingVerification, saveProduct, updateOrderStatus } from "./database.js";
 import { sendCustomerOrderConfirmationEmail, sendCustomerStatusEmail, sendOrderNotifications, sendTestEmail, sendVerificationEmail } from "./notifications.js";
 import { checkoutEmailSchema, checkoutOrderSchema } from "./validation/checkout.js";
 import { productInputSchema } from "./validation/product.js";
@@ -154,12 +151,6 @@ const documentedOperations = {
       { name: "cursor", in: "query", schema: { type: "integer", minimum: 1 }, description: "Product row cursor for the next page." },
       { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 50 }, description: "Number of products per cursor page (default: 20)." },
     ],
-  },
-  "GET /api/admin/database/backup": {
-    tag: "Database",
-    summary: "Download a database backup",
-    description: "Downloads a consistent SQLite snapshot. The backup contains customer data and must be stored securely.",
-    authenticated: true,
   },
   "POST /api/admin/products": {
     tag: "Products",
@@ -347,17 +338,29 @@ const createOpenApiDocument = () => {
 };
 
 app.get("/health", (_request, response) => response.json({ ok: true, service: "milk-villa-backend" }));
-app.get("/api/products", (request, response) => {
-  const total = countProducts();
-  const pagination = getPagination(request.query, total, 6);
-  const result = listProducts(pagination);
-  response.json({
-    products: result.products,
-    pagination: { page: pagination.page, limit: pagination.limit, total: pagination.total, totalPages: pagination.totalPages },
-  });
+app.get("/api/products", async (request, response) => {
+  try {
+    const total = await countProducts();
+    const pagination = getPagination(request.query, total, 6);
+    const result = await listProducts(pagination);
+    return response.json({
+      products: result.products,
+      pagination: { page: pagination.page, limit: pagination.limit, total: pagination.total, totalPages: pagination.totalPages },
+    });
+  } catch (error) {
+    console.error("MongoDB product load failed:", error);
+    return response.status(500).json({ error: "Products could not be loaded." });
+  }
 });
-app.get("/api/products/categories", (_request, response) => response.json({ categories: listProductCategories() }));
-app.get("/api/admin/products", requireOwner, (request, response) => {
+app.get("/api/products/categories", async (_request, response) => {
+  try {
+    return response.json({ categories: await listProductCategories() });
+  } catch (error) {
+    console.error("MongoDB product categories load failed:", error);
+    return response.status(500).json({ error: "Product categories could not be loaded." });
+  }
+});
+app.get("/api/admin/products", requireOwner, async (request, response) => {
   const requestedLimit = request.query.limit === undefined ? 20 : Number(request.query.limit);
   if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) return response.status(400).json({ error: "Product page limit must be an integer from 1 to 50." });
   let cursor = null;
@@ -366,43 +369,13 @@ app.get("/api/admin/products", requireOwner, (request, response) => {
     if (!Number.isSafeInteger(cursor) || cursor < 1) return response.status(400).json({ error: "Product cursor must be a positive integer." });
   }
   try {
-    return response.json(listAdminProducts({ cursor, limit: requestedLimit }));
+    return response.json(await listAdminProducts({ cursor, limit: requestedLimit }));
   } catch (error) {
-    console.error("SQLite admin product load failed:", error);
+    console.error("MongoDB admin product load failed:", error);
     return response.status(500).json({ error: "Products could not be loaded." });
   }
 });
-app.get("/api/admin/database/backup", requireOwner, async (_request, response, next) => {
-  let temporaryDirectory;
-  try {
-    temporaryDirectory = await mkdtemp(join(tmpdir(), "milk-villa-backup-"));
-    const backupPath = join(temporaryDirectory, "milk-villa.sqlite");
-    await backupDatabase(backupPath);
-    response.set({
-      "Cache-Control": "private, no-store",
-      "Content-Type": "application/vnd.sqlite3",
-    });
-    response.download(backupPath, `milk-villa-backup-${new Date().toISOString().slice(0, 10)}.sqlite`, async (error) => {
-      await rm(temporaryDirectory, { recursive: true, force: true }).catch((cleanupError) => {
-        console.error("Temporary SQLite backup cleanup failed:", cleanupError);
-      });
-      if (error) {
-        console.error("SQLite backup download failed:", error);
-        if (response.headersSent) response.destroy();
-        else next(error);
-      }
-    });
-  } catch (error) {
-    if (temporaryDirectory) {
-      await rm(temporaryDirectory, { recursive: true, force: true }).catch((cleanupError) => {
-        console.error("Temporary SQLite backup cleanup failed:", cleanupError);
-      });
-    }
-    console.error("SQLite backup creation failed:", error);
-    return response.status(500).json({ error: "Database backup could not be created." });
-  }
-});
-app.post("/api/admin/products", requireOwner, (request, response) => {
+app.post("/api/admin/products", requireOwner, async (request, response) => {
   const validation = productInputSchema.safeParse(request.body || {});
   if (!validation.success) {
     return response.status(400).json({
@@ -411,13 +384,13 @@ app.post("/api/admin/products", requireOwner, (request, response) => {
     });
   }
   try {
-    const product = saveProduct(validation.data);
+    const product = await saveProduct(validation.data);
     return response.status(201).json({ product });
   } catch (error) {
-    if (error.code === "SQLITE_CONSTRAINT_PRIMARYKEY" || error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+    if (error.code === "P2002") {
       return response.status(409).json({ error: "A unique product ID could not be generated. Change the product type or pack size and try again." });
     }
-    console.error("SQLite product save failed:", error);
+    console.error("MongoDB product save failed:", error);
     return response.status(500).json({ error: "Product could not be saved." });
   }
 });
@@ -473,7 +446,7 @@ app.post("/api/email/verification", async (request, response) => {
     const submittedForm = submittedCheckout.form || {};
     const form = Object.fromEntries(["customerName", "email", "phone", "address", "city", "pincode", "notes"].map((field) => [field, String(submittedForm[field] || "").slice(0, 1000)]));
     form.email = email;
-    const catalog = new Map(getAllProducts().map((product) => [product.id, product]));
+    const catalog = new Map((await getAllProducts()).map((product) => [product.id, product]));
     const items = (Array.isArray(submittedCheckout.items) ? submittedCheckout.items : []).flatMap((item) => {
       const product = catalog.get(item.productId);
       const quantity = Number(item.quantity);
@@ -517,8 +490,25 @@ app.post("/api/orders", async (request, response) => {
       });
     }
     const { customerName, email: normalizedEmail, verificationToken, phone, address, city, pincode, notes, latitude, longitude, items } = validation.data;
-    if (getVerifiedEmail(verificationToken)?.email !== normalizedEmail && !(await findVerifiedEmail(normalizedEmail))) return response.status(403).json({ error: "Verify your email before placing this order." });
-    const catalog = new Map(getAllProducts().map((product) => [product.id, product]));
+    let emailIsVerified = getVerifiedEmail(verificationToken)?.email === normalizedEmail;
+    if (!emailIsVerified) {
+      try {
+        emailIsVerified = await findVerifiedEmail(normalizedEmail);
+      } catch (databaseError) {
+        console.error("MongoDB email verification lookup failed:", databaseError);
+        return response.status(500).json({ error: "Email verification could not be checked." });
+      }
+    }
+    if (!emailIsVerified) return response.status(403).json({ error: "Verify your email before placing this order." });
+
+    let products;
+    try {
+      products = await getAllProducts();
+    } catch (databaseError) {
+      console.error("MongoDB product lookup failed:", databaseError);
+      return response.status(500).json({ error: "Products could not be loaded." });
+    }
+    const catalog = new Map(products.map((product) => [product.id, product]));
     const normalizedItems = items.map((item) => {
       const product = catalog.get(item.productId);
       if (!product) throw new Error("One or more selected products are no longer available.");
@@ -548,9 +538,9 @@ app.post("/api/orders", async (request, response) => {
       createdAt: new Date().toISOString(),
     };
     try {
-      saveOrder(order);
+      await saveOrder(order);
     } catch (databaseError) {
-      console.error("SQLite order save failed:", databaseError);
+      console.error("MongoDB order save failed:", databaseError);
       return response.status(500).json({ error: "Order could not be saved." });
     }
     publishAdminEvent("order-created", { orderId: order.id });
@@ -597,7 +587,8 @@ app.get("/api/orders", requireOwner, async (request, response) => {
     if (dateFrom && dateTo && dateFrom > dateTo) return response.status(400).json({ error: "The start date must be on or before the end date." });
 
     const category = request.query.category;
-    if (category && !listProductCategories().includes(category)) return response.status(400).json({ error: "Invalid product category filter." });
+    const categories = await listProductCategories();
+    if (category && !categories.includes(category)) return response.status(400).json({ error: "Invalid product category filter." });
     const distance = request.query.distance;
     if (distance && !distanceBands[distance]) return response.status(400).json({ error: "Invalid delivery distance filter." });
     const sortDate = request.query.sortDate || "newest";
@@ -607,13 +598,13 @@ app.get("/api/orders", requireOwner, async (request, response) => {
       status,
       dateFrom: dateFrom ? `${dateFrom}T00:00:00.000Z` : undefined,
       dateToExclusive: dateTo ? new Date(nextDate(dateTo)).toISOString() : undefined,
-      categoryProductIds: category ? getAllProducts().filter((product) => product.category === category).map(({ id }) => id) : undefined,
+      categoryProductIds: category ? (await getAllProducts()).filter((product) => product.category === category).map(({ id }) => id) : undefined,
       ...distanceBands[distance],
     };
-    const total = countOrders(filters);
+    const total = await countOrders(filters);
     const pagination = getPagination(request.query, total, 8);
-    const result = listOrders({ ...pagination, ...filters, sortDate });
-    const categoryByProductId = new Map(getAllProducts().map(({ id, category }) => [id, category]));
+    const result = await listOrders({ ...pagination, ...filters, sortDate });
+    const categoryByProductId = new Map((await getAllProducts()).map(({ id, category }) => [id, category]));
     const orders = result.orders.map((order) => ({
       ...order,
       items: order.items.map((item) => ({ ...item, category: item.category || categoryByProductId.get(item.productId) })),
@@ -625,8 +616,8 @@ app.get("/api/orders", requireOwner, async (request, response) => {
       counts,
     });
   } catch (error) {
-    console.error("SQLite order load failed:", error);
-    response.status(500).json({ error: error.message });
+    console.error("MongoDB order load failed:", error);
+    response.status(500).json({ error: "Orders could not be loaded." });
   }
 });
 
@@ -639,9 +630,9 @@ app.put("/api/orders/:id/status", requireOwner, async (request, response) => {
 
   let result;
   try {
-    result = updateOrderStatus(request.params.id, status, cancellationReason);
+    result = await updateOrderStatus(request.params.id, status, cancellationReason);
   } catch (error) {
-    console.error("SQLite order update failed:", error);
+    console.error("MongoDB order update failed:", error);
     return response.status(500).json({ error: error.message });
   }
   if (result.kind === "not-found") return response.status(404).json({ error: "Order not found." });
@@ -664,4 +655,19 @@ app.get("/api/docs/openapi.json", (_request, response) => response.json(createOp
 app.use("/api/docs", swaggerUi.serve, swaggerUi.setup(null, { swaggerOptions: { url: "/api/docs/openapi.json", withCredentials: true } }));
 
 await initializeDatabase();
-app.listen(port, () => console.log(`Milk Villa API listening on port ${port}`));
+const server = app.listen(port, () => console.log(`Milk Villa API listening on port ${port}`));
+
+const shutdown = async () => {
+  server.close(async (error) => {
+    if (error) console.error("HTTP server shutdown failed:", error);
+    try {
+      await disconnectDatabase();
+      process.exit(error ? 1 : 0);
+    } catch (disconnectError) {
+      console.error("MongoDB shutdown failed:", disconnectError);
+      process.exit(1);
+    }
+  });
+};
+process.once("SIGINT", shutdown);
+process.once("SIGTERM", shutdown);

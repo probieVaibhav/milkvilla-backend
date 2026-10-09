@@ -1,0 +1,63 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("MONGODB_URI")
+}
+
+model Product {
+  id          String @id @map("_id")
+  name        String
+  category    String
+  price       Float
+  unit        String
+  description String
+  emoji       String
+  sortOrder   Int    @unique(map: "products_sortOrder_key")
+
+  @@index([category], map: "products_category_idx")
+  @@map("products")
+}
+
+model Order {
+  id                 String   @id @map("_id")
+  status             String
+  createdAt          DateTime
+  customerName       String
+  email              String?
+  phone              String
+  address            String
+  city               String
+  pincode            String
+  notes              String?
+  latitude           Float?
+  longitude          Float?
+  distanceKm         Float?
+  items              Json
+  productIds         String[]
+  subtotal           Float
+  deliveryFee        Float
+  total              Float
+  paymentMethod      String
+  cancellationReason String?
+
+  @@index([createdAt], map: "orders_createdAt_idx")
+  @@index([status, createdAt], map: "orders_status_createdAt_idx")
+  @@index([distanceKm], map: "orders_distanceKm_idx")
+  @@index([productIds], map: "orders_productIds_idx")
+  @@map("orders")
+}
+
+model EmailVerification {
+  email      String    @id @map("_id")
+  verifiedAt DateTime?
+  nonce      String?
+  expiresAt  Float?
+  lastSentAt Float?
+  checkout   Json?
+
+  @@index([expiresAt], map: "email_verifications_expiresAt_idx")
+  @@map("email_verifications")
+}
