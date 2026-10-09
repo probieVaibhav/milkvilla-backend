@@ -4,19 +4,38 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import swaggerUi from "swagger-ui-express";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { completeEmailVerification, countOrders, countProducts, findVerifiedEmail, getAllProducts, initializeDatabase, listAdminProducts, listOrders, listProductCategories, listProducts, readPendingVerification, saveOrder, savePendingVerification, saveProduct, updateOrderStatus } from "./database.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { backupDatabase, completeEmailVerification, countOrders, countProducts, findVerifiedEmail, getAllProducts, initializeDatabase, listAdminProducts, listOrders, listProductCategories, listProducts, readPendingVerification, saveOrder, savePendingVerification, saveProduct, updateOrderStatus } from "./database.js";
 import { sendCustomerOrderConfirmationEmail, sendCustomerStatusEmail, sendOrderNotifications, sendTestEmail, sendVerificationEmail } from "./notifications.js";
 import { checkoutEmailSchema, checkoutOrderSchema } from "./validation/checkout.js";
 import { productInputSchema } from "./validation/product.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
+const sessionSecret = process.env.ADMIN_SESSION_SECRET;
+if (!sessionSecret || Buffer.byteLength(sessionSecret, "utf8") < 32) {
+  throw new Error("ADMIN_SESSION_SECRET must be configured with at least 32 bytes of random data.");
+}
+if (process.env.EMAIL_VERIFICATION_SECRET && Buffer.byteLength(process.env.EMAIL_VERIFICATION_SECRET, "utf8") < 32) {
+  throw new Error("EMAIL_VERIFICATION_SECRET must contain at least 32 bytes of random data.");
+}
 const frontendOrigin = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/+$/, "");
 const verificationFrontendUrl = (process.env.NODE_ENV === "production" ? process.env.FRONTEND_URL_PROD || process.env.FRONTEND_URL : process.env.FRONTEND_URL || process.env.FRONTEND_URL_PROD || "http://localhost:5173").replace(/\/+$/, "");
 const sessionCookie = "milk-villa-owner-session";
 const sessionDurationMs = 8 * 60 * 60 * 1000;
 const statuses = ["pending", "placed", "out-for-delivery", "delivered", "canceled"];
 const adminEventClients = new Set();
+
+app.set("trust proxy", 1);
+app.use((request, response, next) => {
+  if (process.env.NODE_ENV === "production" && !request.secure) {
+    return response.status(426).json({ error: "HTTPS is required for API requests." });
+  }
+  if (process.env.NODE_ENV === "production") response.set("Strict-Transport-Security", "max-age=31536000");
+  next();
+});
 
 const parseDateFilter = (value) => {
   if (value === undefined || value === "") return null;
@@ -72,7 +91,7 @@ const distanceKm = (latitude, longitude) => {
 };
 
 const sign = (value) =>
-  createHmac("sha256", process.env.ADMIN_SESSION_SECRET || "development-secret")
+  createHmac("sha256", sessionSecret)
     .update(value)
     .digest("base64url");
 const createSession = (username) => {
@@ -83,7 +102,7 @@ const validSession = (token) => {
   if (!token) return false;
   const [username, timestamp, signature] = token.split(".");
   const issuedAt = Number(timestamp);
-  if (!username || !signature || !Number.isFinite(issuedAt) || Date.now() - issuedAt > sessionDurationMs || issuedAt > Date.now()) return false;
+  if (!username || username !== process.env.ADMIN_USERNAME || !signature || !Number.isFinite(issuedAt) || Date.now() - issuedAt > sessionDurationMs || issuedAt > Date.now()) return false;
   const expected = Buffer.from(sign(`${username}.${timestamp}`));
   const actual = Buffer.from(signature);
   return expected.length === actual.length && timingSafeEqual(expected, actual);
@@ -135,6 +154,12 @@ const documentedOperations = {
       { name: "cursor", in: "query", schema: { type: "integer", minimum: 1 }, description: "Product row cursor for the next page." },
       { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 50 }, description: "Number of products per cursor page (default: 20)." },
     ],
+  },
+  "GET /api/admin/database/backup": {
+    tag: "Database",
+    summary: "Download a database backup",
+    description: "Downloads a consistent SQLite snapshot. The backup contains customer data and must be stored securely.",
+    authenticated: true,
   },
   "POST /api/admin/products": {
     tag: "Products",
@@ -345,6 +370,36 @@ app.get("/api/admin/products", requireOwner, (request, response) => {
   } catch (error) {
     console.error("SQLite admin product load failed:", error);
     return response.status(500).json({ error: "Products could not be loaded." });
+  }
+});
+app.get("/api/admin/database/backup", requireOwner, async (_request, response, next) => {
+  let temporaryDirectory;
+  try {
+    temporaryDirectory = await mkdtemp(join(tmpdir(), "milk-villa-backup-"));
+    const backupPath = join(temporaryDirectory, "milk-villa.sqlite");
+    await backupDatabase(backupPath);
+    response.set({
+      "Cache-Control": "private, no-store",
+      "Content-Type": "application/vnd.sqlite3",
+    });
+    response.download(backupPath, `milk-villa-backup-${new Date().toISOString().slice(0, 10)}.sqlite`, async (error) => {
+      await rm(temporaryDirectory, { recursive: true, force: true }).catch((cleanupError) => {
+        console.error("Temporary SQLite backup cleanup failed:", cleanupError);
+      });
+      if (error) {
+        console.error("SQLite backup download failed:", error);
+        if (response.headersSent) response.destroy();
+        else next(error);
+      }
+    });
+  } catch (error) {
+    if (temporaryDirectory) {
+      await rm(temporaryDirectory, { recursive: true, force: true }).catch((cleanupError) => {
+        console.error("Temporary SQLite backup cleanup failed:", cleanupError);
+      });
+    }
+    console.error("SQLite backup creation failed:", error);
+    return response.status(500).json({ error: "Database backup could not be created." });
   }
 });
 app.post("/api/admin/products", requireOwner, (request, response) => {

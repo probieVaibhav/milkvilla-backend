@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
-import { mkdir, readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import { mkdir, readFile, stat } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { products as defaultProducts } from "./products.js";
 
@@ -50,8 +50,20 @@ const importLegacyDatabase = async (connection) => {
 
 export const initializeDatabase = async () => {
   if (database) return;
-  const databasePath = process.env.SQLITE_DB_PATH ? resolve(process.env.SQLITE_DB_PATH) : resolve(moduleDirectory, "../milk-villa.sqlite");
-  await mkdir(dirname(databasePath), { recursive: true });
+  const configuredPath = process.env.SQLITE_DB_PATH;
+  if (process.env.NODE_ENV === "production" && (!configuredPath || !isAbsolute(configuredPath))) {
+    throw new Error("SQLITE_DB_PATH must be set to an absolute path on persistent storage in production.");
+  }
+  const databasePath = configuredPath ? resolve(configuredPath) : resolve(moduleDirectory, "../milk-villa.sqlite");
+  if (process.env.NODE_ENV === "production") {
+    const directory = await stat(dirname(databasePath)).catch((error) => {
+      if (error.code === "ENOENT") throw new Error(`SQLite storage directory does not exist: ${dirname(databasePath)}. Verify the persistent disk is mounted.`);
+      throw error;
+    });
+    if (!directory.isDirectory()) throw new Error(`SQLite storage path is not a directory: ${dirname(databasePath)}.`);
+  } else {
+    await mkdir(dirname(databasePath), { recursive: true });
+  }
 
   const connection = new Database(databasePath);
   connection.pragma("journal_mode = WAL");
@@ -120,6 +132,7 @@ export const initializeDatabase = async () => {
     connection.exec("CREATE INDEX IF NOT EXISTS orders_distance_km_idx ON orders (distance_km)");
     await importLegacyDatabase(connection);
     database = connection;
+    console.log(`SQLite database initialized at ${databasePath}`);
   } catch (error) {
     connection.close();
     throw error;
@@ -130,6 +143,8 @@ const getDatabase = () => {
   if (!database) throw new Error("SQLite database has not been initialized.");
   return database;
 };
+
+export const backupDatabase = (destination) => getDatabase().backup(destination);
 
 export const findVerifiedEmail = (email) => Boolean(getDatabase().prepare("SELECT 1 FROM verified_emails WHERE email = ?").get(email));
 
@@ -165,9 +180,7 @@ export const listProducts = ({ offset = 0, limit = 50 } = {}) => {
 
 export const listAdminProducts = ({ cursor, limit = 20 }) => {
   const connection = getDatabase();
-  const rows = cursor === null || cursor === undefined
-    ? connection.prepare("SELECT rowid AS cursor, id, name, category, price, unit, description, emoji FROM products ORDER BY rowid DESC LIMIT ?").all(limit + 1)
-    : connection.prepare("SELECT rowid AS cursor, id, name, category, price, unit, description, emoji FROM products WHERE rowid < ? ORDER BY rowid DESC LIMIT ?").all(cursor, limit + 1);
+  const rows = cursor === null || cursor === undefined ? connection.prepare("SELECT rowid AS cursor, id, name, category, price, unit, description, emoji FROM products ORDER BY rowid DESC LIMIT ?").all(limit + 1) : connection.prepare("SELECT rowid AS cursor, id, name, category, price, unit, description, emoji FROM products WHERE rowid < ? ORDER BY rowid DESC LIMIT ?").all(cursor, limit + 1);
   const hasMore = rows.length > limit;
   const pageRows = hasMore ? rows.slice(0, limit) : rows;
   return {
@@ -180,18 +193,24 @@ export const listAdminProducts = ({ cursor, limit = 20 }) => {
 
 export const countProducts = () => getDatabase().prepare("SELECT COUNT(*) AS total FROM products").get().total;
 
-export const getAllProducts = () =>
-  getDatabase().prepare("SELECT id, name, category, price, unit, description, emoji FROM products ORDER BY rowid ASC").all().map(toProduct);
+export const getAllProducts = () => getDatabase().prepare("SELECT id, name, category, price, unit, description, emoji FROM products ORDER BY rowid ASC").all().map(toProduct);
 
 export const listProductCategories = () =>
-  getDatabase().prepare("SELECT DISTINCT category FROM products ORDER BY category COLLATE NOCASE").all().map(({ category }) => category);
+  getDatabase()
+    .prepare("SELECT DISTINCT category FROM products ORDER BY category COLLATE NOCASE")
+    .all()
+    .map(({ category }) => category);
 
 export const saveProduct = ({ packSize, unitType, ...product }) => {
   const connection = getDatabase();
   const normalizedPackSize = String(packSize);
   const unitSlug = unitType.toLowerCase();
   const baseId = `${product.category}-${normalizedPackSize.replace(".", "-")}${unitSlug}`;
-  const nameSlug = product.name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "product";
+  const nameSlug =
+    product.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "product";
   let id = baseId;
   let suffix = 1;
   while (connection.prepare("SELECT 1 FROM products WHERE id = ?").get(id)) {
@@ -199,9 +218,7 @@ export const saveProduct = ({ packSize, unitType, ...product }) => {
     suffix += 1;
   }
   const savedProduct = { ...product, id, unit: `${normalizedPackSize} ${unitType}` };
-  connection
-    .prepare("INSERT INTO products (id, name, category, price, unit, description, emoji) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(savedProduct.id, savedProduct.name, savedProduct.category, savedProduct.price, savedProduct.unit, savedProduct.description, savedProduct.emoji);
+  connection.prepare("INSERT INTO products (id, name, category, price, unit, description, emoji) VALUES (?, ?, ?, ?, ?, ?, ?)").run(savedProduct.id, savedProduct.name, savedProduct.category, savedProduct.price, savedProduct.unit, savedProduct.description, savedProduct.emoji);
   return savedProduct;
 };
 
@@ -216,9 +233,7 @@ export const completeEmailVerification = (email, nonce) =>
   })();
 
 export const saveOrder = (order) => {
-  getDatabase()
-    .prepare("INSERT INTO orders (id, status, created_at, data, latitude, longitude, distance_km) VALUES (?, ?, ?, ?, ?, ?, ?)")
-    .run(order.id, order.status, order.createdAt, JSON.stringify(order), order.latitude, order.longitude, order.distanceKm);
+  getDatabase().prepare("INSERT INTO orders (id, status, created_at, data, latitude, longitude, distance_km) VALUES (?, ?, ?, ?, ?, ?, ?)").run(order.id, order.status, order.createdAt, JSON.stringify(order), order.latitude, order.longitude, order.distanceKm);
 };
 
 const getOrderConditions = ({ status, dateFrom, dateToExclusive, categoryProductIds, minDistanceKm, minDistanceInclusive, maxDistanceKm } = {}) => {
@@ -261,9 +276,7 @@ export const listOrders = ({ offset, limit, sortDate = "newest", ...filters }) =
   const connection = getDatabase();
   const { where, parameters } = getOrderConditions(filters);
   const total = countOrders(filters);
-  const rows = connection
-    .prepare(`SELECT data, latitude, longitude FROM orders ${where} ORDER BY created_at ${sortDate === "oldest" ? "ASC" : "DESC"}, id ASC LIMIT ? OFFSET ?`)
-    .all(...parameters, limit, offset);
+  const rows = connection.prepare(`SELECT data, latitude, longitude FROM orders ${where} ORDER BY created_at ${sortDate === "oldest" ? "ASC" : "DESC"}, id ASC LIMIT ? OFFSET ?`).all(...parameters, limit, offset);
   const orders = rows.map((row) => ({ ...JSON.parse(row.data), latitude: row.latitude, longitude: row.longitude }));
   const counts = Object.fromEntries(
     connection
