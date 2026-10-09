@@ -4,10 +4,10 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import swaggerUi from "swagger-ui-express";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { products } from "./products.js";
-import { completeEmailVerification, countOrders, findVerifiedEmail, initializeDatabase, listOrders, readPendingVerification, saveOrder, savePendingVerification, updateOrderStatus } from "./database.js";
+import { completeEmailVerification, countOrders, countProducts, findVerifiedEmail, getAllProducts, initializeDatabase, listAdminProducts, listOrders, listProductCategories, listProducts, readPendingVerification, saveOrder, savePendingVerification, saveProduct, updateOrderStatus } from "./database.js";
 import { sendCustomerOrderConfirmationEmail, sendCustomerStatusEmail, sendOrderNotifications, sendTestEmail, sendVerificationEmail } from "./notifications.js";
 import { checkoutEmailSchema, checkoutOrderSchema } from "./validation/checkout.js";
+import { productInputSchema } from "./validation/product.js";
 
 const app = express();
 const port = Number(process.env.PORT || 4000);
@@ -17,6 +17,22 @@ const sessionCookie = "milk-villa-owner-session";
 const sessionDurationMs = 8 * 60 * 60 * 1000;
 const statuses = ["pending", "placed", "out-for-delivery", "delivered", "canceled"];
 const adminEventClients = new Set();
+
+const parseDateFilter = (value) => {
+  if (value === undefined || value === "") return null;
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value ? value : undefined;
+};
+
+const nextDate = (date) => new Date(`${date}T00:00:00.000Z`).getTime() + 24 * 60 * 60 * 1000;
+
+const distanceBands = {
+  "1-10": { minDistanceKm: 1, minDistanceInclusive: true, maxDistanceKm: 10 },
+  "10-20": { minDistanceKm: 10, maxDistanceKm: 20 },
+  "20-50": { minDistanceKm: 20, maxDistanceKm: 50 },
+  "50+": { minDistanceKm: 50 },
+};
 
 const publishAdminEvent = (eventName, payload) => {
   const message = `event: ${eventName}\ndata: ${JSON.stringify(payload)}\n\n`;
@@ -110,6 +126,41 @@ const documentedOperations = {
       { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 50 }, description: "Results per page (default: 6, maximum: 50)." },
     ],
   },
+  "GET /api/products/categories": { tag: "Products", summary: "List product types" },
+  "GET /api/admin/products": {
+    tag: "Products",
+    summary: "List products for the owner",
+    authenticated: true,
+    parameters: [
+      { name: "cursor", in: "query", schema: { type: "integer", minimum: 1 }, description: "Product row cursor for the next page." },
+      { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 50 }, description: "Number of products per cursor page (default: 20)." },
+    ],
+  },
+  "POST /api/admin/products": {
+    tag: "Products",
+    summary: "Add a product",
+    authenticated: true,
+    requestBody: {
+      required: true,
+      content: {
+        "application/json": {
+          schema: {
+            type: "object",
+            required: ["name", "category", "price", "packSize", "unitType", "description", "emoji"],
+            properties: {
+              name: { type: "string" },
+              category: { type: "string" },
+              price: { type: "number", exclusiveMinimum: 0 },
+              packSize: { type: "number", exclusiveMinimum: 0 },
+              unitType: { type: "string", enum: ["L", "KG", "G"] },
+              description: { type: "string" },
+              emoji: { type: "string" },
+            },
+          },
+        },
+      },
+    },
+  },
   "POST /api/auth/login": {
     tag: "Authentication",
     summary: "Log in as the owner",
@@ -197,6 +248,12 @@ const documentedOperations = {
     parameters: [
       { name: "page", in: "query", schema: { type: "integer", minimum: 1 }, description: "Page number (default: 1)." },
       { name: "limit", in: "query", schema: { type: "integer", minimum: 1, maximum: 50 }, description: "Results per page (default: 8, maximum: 50)." },
+      { name: "status", in: "query", schema: { type: "string", enum: statuses }, description: "Filter orders by status." },
+      { name: "dateFrom", in: "query", schema: { type: "string", format: "date" }, description: "Include orders placed on or after this date (UTC)." },
+      { name: "dateTo", in: "query", schema: { type: "string", format: "date" }, description: "Include orders placed on or before this date (UTC)." },
+      { name: "category", in: "query", schema: { type: "string" }, description: "Filter by product type in the order." },
+      { name: "distance", in: "query", schema: { type: "string", enum: Object.keys(distanceBands) }, description: "Filter by delivery distance in kilometers." },
+      { name: "sortDate", in: "query", schema: { type: "string", enum: ["newest", "oldest"], default: "newest" }, description: "Sort orders by creation date." },
     ],
   },
   "PUT /api/orders/:id/status": {
@@ -266,11 +323,48 @@ const createOpenApiDocument = () => {
 
 app.get("/health", (_request, response) => response.json({ ok: true, service: "milk-villa-backend" }));
 app.get("/api/products", (request, response) => {
-  const pagination = getPagination(request.query, products.length, 6);
+  const total = countProducts();
+  const pagination = getPagination(request.query, total, 6);
+  const result = listProducts(pagination);
   response.json({
-    products: products.slice(pagination.offset, pagination.offset + pagination.limit),
+    products: result.products,
     pagination: { page: pagination.page, limit: pagination.limit, total: pagination.total, totalPages: pagination.totalPages },
   });
+});
+app.get("/api/products/categories", (_request, response) => response.json({ categories: listProductCategories() }));
+app.get("/api/admin/products", requireOwner, (request, response) => {
+  const requestedLimit = request.query.limit === undefined ? 20 : Number(request.query.limit);
+  if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 50) return response.status(400).json({ error: "Product page limit must be an integer from 1 to 50." });
+  let cursor = null;
+  if (request.query.cursor !== undefined) {
+    cursor = Number(request.query.cursor);
+    if (!Number.isSafeInteger(cursor) || cursor < 1) return response.status(400).json({ error: "Product cursor must be a positive integer." });
+  }
+  try {
+    return response.json(listAdminProducts({ cursor, limit: requestedLimit }));
+  } catch (error) {
+    console.error("SQLite admin product load failed:", error);
+    return response.status(500).json({ error: "Products could not be loaded." });
+  }
+});
+app.post("/api/admin/products", requireOwner, (request, response) => {
+  const validation = productInputSchema.safeParse(request.body || {});
+  if (!validation.success) {
+    return response.status(400).json({
+      error: "Please correct the product details and try again.",
+      fieldErrors: Object.fromEntries(validation.error.issues.map(({ path, message }) => [path[0], message])),
+    });
+  }
+  try {
+    const product = saveProduct(validation.data);
+    return response.status(201).json({ product });
+  } catch (error) {
+    if (error.code === "SQLITE_CONSTRAINT_PRIMARYKEY" || error.code === "SQLITE_CONSTRAINT_UNIQUE") {
+      return response.status(409).json({ error: "A unique product ID could not be generated. Change the product type or pack size and try again." });
+    }
+    console.error("SQLite product save failed:", error);
+    return response.status(500).json({ error: "Product could not be saved." });
+  }
 });
 
 app.post("/api/auth/login", (request, response) => {
@@ -324,7 +418,7 @@ app.post("/api/email/verification", async (request, response) => {
     const submittedForm = submittedCheckout.form || {};
     const form = Object.fromEntries(["customerName", "email", "phone", "address", "city", "pincode", "notes"].map((field) => [field, String(submittedForm[field] || "").slice(0, 1000)]));
     form.email = email;
-    const catalog = new Map(products.map((product) => [product.id, product]));
+    const catalog = new Map(getAllProducts().map((product) => [product.id, product]));
     const items = (Array.isArray(submittedCheckout.items) ? submittedCheckout.items : []).flatMap((item) => {
       const product = catalog.get(item.productId);
       const quantity = Number(item.quantity);
@@ -369,11 +463,11 @@ app.post("/api/orders", async (request, response) => {
     }
     const { customerName, email: normalizedEmail, verificationToken, phone, address, city, pincode, notes, latitude, longitude, items } = validation.data;
     if (getVerifiedEmail(verificationToken)?.email !== normalizedEmail && !(await findVerifiedEmail(normalizedEmail))) return response.status(403).json({ error: "Verify your email before placing this order." });
-    const catalog = new Map(products.map((product) => [product.id, product]));
+    const catalog = new Map(getAllProducts().map((product) => [product.id, product]));
     const normalizedItems = items.map((item) => {
       const product = catalog.get(item.productId);
       if (!product) throw new Error("One or more selected products are no longer available.");
-      return { productId: product.id, name: product.name, quantity: item.quantity, price: product.price, total: product.price * item.quantity };
+      return { productId: product.id, name: product.name, category: product.category, quantity: item.quantity, price: product.price, total: product.price * item.quantity };
     });
     const subtotal = normalizedItems.reduce((sum, item) => sum + item.total, 0);
     const calculatedDistance = Number(distanceKm(latitude, longitude).toFixed(2));
@@ -440,12 +534,38 @@ app.get("/api/admin/order-events", requireOwner, (request, response) => {
 
 app.get("/api/orders", requireOwner, async (request, response) => {
   try {
-    const total = countOrders();
+    const status = request.query.status;
+    if (status && !statuses.includes(status)) return response.status(400).json({ error: "Invalid order status filter." });
+    const dateFrom = parseDateFilter(request.query.dateFrom);
+    const dateTo = parseDateFilter(request.query.dateTo);
+    if (dateFrom === undefined || dateTo === undefined) return response.status(400).json({ error: "Dates must be valid calendar dates in YYYY-MM-DD format." });
+    if (dateFrom && dateTo && dateFrom > dateTo) return response.status(400).json({ error: "The start date must be on or before the end date." });
+
+    const category = request.query.category;
+    if (category && !listProductCategories().includes(category)) return response.status(400).json({ error: "Invalid product category filter." });
+    const distance = request.query.distance;
+    if (distance && !distanceBands[distance]) return response.status(400).json({ error: "Invalid delivery distance filter." });
+    const sortDate = request.query.sortDate || "newest";
+    if (!["newest", "oldest"].includes(sortDate)) return response.status(400).json({ error: "Invalid order date sort." });
+
+    const filters = {
+      status,
+      dateFrom: dateFrom ? `${dateFrom}T00:00:00.000Z` : undefined,
+      dateToExclusive: dateTo ? new Date(nextDate(dateTo)).toISOString() : undefined,
+      categoryProductIds: category ? getAllProducts().filter((product) => product.category === category).map(({ id }) => id) : undefined,
+      ...distanceBands[distance],
+    };
+    const total = countOrders(filters);
     const pagination = getPagination(request.query, total, 8);
-    const result = listOrders(pagination);
+    const result = listOrders({ ...pagination, ...filters, sortDate });
+    const categoryByProductId = new Map(getAllProducts().map(({ id, category }) => [id, category]));
+    const orders = result.orders.map((order) => ({
+      ...order,
+      items: order.items.map((item) => ({ ...item, category: item.category || categoryByProductId.get(item.productId) })),
+    }));
     const counts = Object.fromEntries(statuses.map((status) => [status, result.counts[status] || 0]));
     response.json({
-      orders: result.orders,
+      orders,
       pagination: { page: pagination.page, limit: pagination.limit, total: pagination.total, totalPages: pagination.totalPages },
       counts,
     });

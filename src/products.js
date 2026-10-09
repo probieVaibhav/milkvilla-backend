@@ -2,6 +2,7 @@ export const products = [
   {
     id: "milk-1l-cow",
     name: "Fresh Cow Milk",
+    category: "milk",
     price: 55,
     unit: "1 L",
     description: "Pure farm milk, rich in nutrients.",
@@ -10,6 +11,7 @@ export const products = [
   {
     id: "milk-1l-buffalo",
     name: "Fresh Buffelo Milk",
+    category: "milk",
     price: 70,
     unit: "1 L",
     description: "Pure farm milk, rich in nutrients, High in fat.",
@@ -18,6 +20,7 @@ export const products = [
   {
     id: "ghee-250g",
     name: "Original Ghee",
+    category: "ghee",
     price: 300,
     unit: "250 g",
     description: "Traditional taste and rich aroma.",
@@ -26,6 +29,7 @@ export const products = [
   {
     id: "ghee-500g",
     name: "Original Ghee",
+    category: "ghee",
     price: 600,
     unit: "500 g",
     description: "Traditional taste and rich aroma.",
@@ -34,6 +38,7 @@ export const products = [
   {
     id: "ghee-1kg",
     name: "Original Ghee",
+    category: "ghee",
     price: 1200,
     unit: "1 kg",
     description: "Traditional taste and rich aroma.",
@@ -42,6 +47,7 @@ export const products = [
   {
     id: "dahi-500g",
     name: "Fresh Dahi",
+    category: "dahi",
     price: 40,
     unit: "500 g",
     description: "Creamy and probiotic-rich yogurt.",
@@ -50,6 +56,7 @@ export const products = [
   {
     id: "dahi-1kg",
     name: "Fresh Dahi",
+    category: "dahi",
     price: 80,
     unit: "1 kg",
     description: "Creamy and probiotic-rich yogurt.",
@@ -58,6 +65,7 @@ export const products = [
   {
     id: "paneer-500g",
     name: "Farm Paneer",
+    category: "paneer",
     price: 160,
     unit: "500 g",
     description: "Soft paneer for curries and snacks.",
@@ -66,6 +74,7 @@ export const products = [
   {
     id: "paneer-1kg",
     name: "Farm Paneer",
+    category: "paneer",
     price: 320,
     unit: "1 kg",
     description: "Soft paneer for curries and snacks.",
@@ -74,6 +83,7 @@ export const products = [
   {
     id: "buttermilk-1l",
     name: "Buttermilk (Plain Lassi)",
+    category: "buttermilk",
     price: 30,
     unit: "1 L",
     description: "Cooling and protein-packed natural drink.",
